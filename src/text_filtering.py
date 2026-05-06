@@ -10,6 +10,8 @@ from typing import Any, Literal
 import nltk
 from nltk.corpus import stopwords
 
+from src.word_forms import WORD_FORM_MAP
+
 STOPWORD_VERSION = "v1.0"
 
 CONTRACTION_MAP = {
@@ -73,10 +75,11 @@ CONTRACTION_MAP = {
 
 DEFINITE_LYRIC_STOPWORDS = {
     "yeah", "yea", "yep", "nope",
-    "oh", "ooh", "oooh", "ah", "uh", "um", "hmm",
+    "oh", "ooh", "oooh", "ah", "uh", "um", "hmm", "hm", "oo", "mmmh",
     "hey", "ha", "haha",
     "la", "na", "da", "doo",
     "woah", "whoa", "mmm",
+    "mm",
     "chorus", "verse", "intro", "outro", "bridge", "refrain",
     "pre", "hook",
     "lyrics", "lyric", "embed", "contributors", "contributor",
@@ -85,6 +88,12 @@ DEFINITE_LYRIC_STOPWORDS = {
     "need", "come", "would", "think", "always", "much", "ever",
     "used", "got", "even", "something", "everything", "rather",
     "around",
+    "like", "want", "back", "time", "way", "see", "keep", "tell",
+    "feel", "going", "live", "look", "things", "said", "someone",
+    "find", "good", "talk", "us", "long", "hold", "try", "day",
+    "maybe", "call", "last", "half", "little", "right", "nothing",
+    "give", "guess", "watch", "care", "new", "trying", "knew", "made",
+    "two", "getting", "okay", "turn", "might", "thought",
 }
 
 MAYBE_LYRIC_STOPWORDS = {
@@ -186,6 +195,7 @@ def tokenize_and_filter_lyrics(lyrics: str, strictness: StrictnessMode) -> Token
     counts = Counter()
 
     for token in normalized_tokens:
+        token = WORD_FORM_MAP.get(token, token)
         if not token.isalpha():
             reason = "non_alpha"
         elif len(token) <= 1:

@@ -108,6 +108,25 @@ def _song_key(song: dict[str, object]) -> tuple[object, str, str]:
     )
 
 
+def _song_selection_key(song: dict[str, object]) -> str:
+    return "|".join(
+        [
+            str(song.get("genius_song_id", "") or ""),
+            str(song.get("title", "") or "").strip().lower(),
+            str(song.get("artist", "") or "").strip().lower(),
+        ]
+    )
+
+
+def _song_display_label(song: dict[str, object]) -> str:
+    title = str(song.get("title", "") or "").strip() or "(untitled)"
+    artist = str(song.get("artist", "") or "").strip() or "(unknown artist)"
+    reason = str(song.get("exclude_reason", "") or "").strip()
+    if reason:
+        return f"{title} - {artist} [{reason}]"
+    return f"{title} - {artist}"
+
+
 def update_song_lyrics_in_corpus(
     corpus_songs: list[dict[str, object]],
     song_key: dict[str, object],
@@ -150,14 +169,22 @@ def _run_analysis_pipeline(
     dedupe_mode: str,
     exclude_versions: bool,
     filtering_strictness: StrictnessMode,
+    manually_included_song_keys: set[str] | None = None,
+    canonical_artist_name: str | None = None,
 ):
     dedupe_result = dedupe_songs(
         songs=raw_songs,
         mode=dedupe_mode,
         exclude_versions=exclude_versions,
+        canonical_artist_name=canonical_artist_name,
     )
     included_songs = dedupe_result.included
     excluded_songs = dedupe_result.excluded
+    if manually_included_song_keys:
+        manually_reincluded = [song for song in excluded_songs if _song_selection_key(song) in manually_included_song_keys]
+        if manually_reincluded:
+            included_songs = included_songs + manually_reincluded
+            excluded_songs = [song for song in excluded_songs if _song_selection_key(song) not in manually_included_song_keys]
     if not included_songs:
         return None, included_songs, excluded_songs, {}
 
@@ -466,7 +493,9 @@ def main() -> None:
     st.caption("Analyze the words an artist returns to most.")
 
     with st.sidebar:
-        st.header("Settings")
+        st.header("Controls")
+        settings_tab, diagnostics_tab = st.tabs(["Settings", "Diagnostics"])
+    with settings_tab:
         input_mode = st.radio(
             "Input mode",
             ["Genius lyrics", "CSV upload mode", "Paste lyrics mode"],
@@ -484,16 +513,12 @@ def main() -> None:
             ],
             index=0,
         )
-        exclude_versions = st.checkbox(
-            "Exclude live/remix/demo/acoustic/translation versions",
-            value=True,
-        )
+        st.caption("Version exclusions (live/remix/demo/acoustic/translation) are applied automatically in Strict canonical mode.")
         filtering_strictness_label = st.selectbox(
             "Filtering strictness",
             options=["Basic", "Lyric-clean", "Theme-focused"],
             index=1,
         )
-        show_filtered_out_diagnostics = st.checkbox("Show filtered-out words diagnostics", value=False)
         categorize_words = st.checkbox("Categorize top words with OpenAI", value=False)
         show_wordcloud = st.checkbox("Show word cloud", value=True)
         uploaded_csv = st.file_uploader(
@@ -504,11 +529,14 @@ def main() -> None:
         parallel_lyric_fetch_workers = st.slider(
             "Parallel lyric fetch workers",
             min_value=1,
-            max_value=5,
+            max_value=50,
             value=2,
             help="Higher values may be faster but more likely to trigger Genius rate limits.",
         )
+    with diagnostics_tab:
+        show_filtered_out_diagnostics = st.checkbox("Show filtered-out words diagnostics", value=False)
         show_lyricsgenius_diagnostics = st.checkbox("Show lyricsgenius diagnostics", value=False)
+    with settings_tab:
         run_clicked = st.button("Run analysis", type="primary")
 
     strictness_map: dict[str, StrictnessMode] = {
@@ -517,6 +545,7 @@ def main() -> None:
         "Theme-focused": "theme_focused",
     }
     filtering_strictness = strictness_map[filtering_strictness_label]
+    exclude_versions = dedupe_mode == "Strict canonical songs only"
 
     if input_mode == "Genius lyrics":
         st.info(
@@ -591,18 +620,6 @@ def main() -> None:
         _update_official_cache_with_songs(artist_name, corpus_songs, max_songs, include_features)
 
     corpus_df = pd.DataFrame(corpus_songs)
-    if source_used == "Genius lyrics":
-        exact_results = st.session_state.get("official_api_exact_results", [])
-        if exact_results:
-            with st.expander("Temporary debug: exact results received from official Genius API", expanded=False):
-                exact_df = pd.DataFrame(exact_results)
-                if "lyrics" in exact_df.columns:
-                    exact_df["official_api_lyrics_char_count"] = exact_df["lyrics"].apply(_lyrics_char_count)
-                preferred = ["title", "artist", "genius_song_id", "url", "release_date", "official_api_lyrics_char_count"]
-                show_cols = [col for col in preferred if col in exact_df.columns]
-                st.caption(f"Rows returned by official API: {len(exact_df)}")
-                st.dataframe(exact_df[show_cols], width="stretch")
-
     hydration_rows = st.session_state.get("lyricsgenius_hydration_diagnostics", [])
 
     if not corpus_df.empty:
@@ -626,11 +643,37 @@ def main() -> None:
         )
         return
 
+    preview_dedupe = dedupe_songs(
+        songs=corpus_songs,
+        mode=dedupe_mode,
+        exclude_versions=exclude_versions,
+        canonical_artist_name=artist_name if artist_name.strip() else None,
+    )
+    excluded_preview = preview_dedupe.excluded
+    manually_included_song_keys: list[str] = []
+    if excluded_preview:
+        st.subheader("Excluded song controls")
+        st.caption("Songs excluded by dedupe/version filters are listed here. Select any to re-include.")
+        options = [_song_selection_key(song) for song in excluded_preview]
+        labels = {_song_selection_key(song): _song_display_label(song) for song in excluded_preview}
+        manually_included_song_keys = st.multiselect(
+            "Re-include excluded songs",
+            options=options,
+            format_func=lambda key: labels.get(key, key),
+            key="manually_included_song_keys",
+        )
+        excluded_preview_df = pd.DataFrame(excluded_preview)
+        if not excluded_preview_df.empty:
+            show_cols = [col for col in ["title", "artist", "exclude_reason", "album", "release_date"] if col in excluded_preview_df.columns]
+            st.dataframe(excluded_preview_df[show_cols], width="stretch")
+
     analysis_result, included_songs, excluded_songs, token_diagnostics = _run_analysis_pipeline(
         raw_songs=corpus_songs,
         dedupe_mode=dedupe_mode,
         exclude_versions=exclude_versions,
         filtering_strictness=filtering_strictness,
+        manually_included_song_keys=set(manually_included_song_keys),
+        canonical_artist_name=artist_name if artist_name.strip() else None,
     )
     if analysis_result is None:
         st.warning("No songs remained after filtering/deduplication.")
@@ -690,6 +733,12 @@ def main() -> None:
             st.dataframe(pd.DataFrame(removed_top), width="stretch")
         else:
             st.info("No removed tokens to display for current settings.")
+    if show_lyricsgenius_diagnostics:
+        st.subheader("lyricsgenius diagnostics")
+        if hydration_rows:
+            st.dataframe(pd.DataFrame(hydration_rows), width="stretch")
+        else:
+            st.info("No lyricsgenius diagnostics available yet. Run hydration first.")
 
     if show_wordcloud:
         image = make_wordcloud_image(analysis_result.word_frequencies_df)
@@ -818,14 +867,6 @@ def main() -> None:
         file_name="artist_wordprint_analysis.json",
         mime="application/json",
     )
-
-    if not corpus_df.empty:
-        with st.expander("Corpus debug table", expanded=False):
-            st.dataframe(
-                corpus_df[["title", "artist", "lyrics_status", "lyrics_source", "lyrics_char_count"]],
-                width="stretch",
-            )
-
 
 if __name__ == "__main__":
     main()
