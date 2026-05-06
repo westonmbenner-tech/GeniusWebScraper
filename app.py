@@ -127,6 +127,37 @@ def _song_display_label(song: dict[str, object]) -> str:
     return f"{title} - {artist}"
 
 
+def _sort_categories_payload(categories_payload: dict[str, object]) -> dict[str, object]:
+    categories = categories_payload.get("categories", [])
+    if not isinstance(categories, list):
+        return categories_payload
+    normalized_categories = []
+    for category in categories:
+        if not isinstance(category, dict):
+            continue
+        words = category.get("words", [])
+        if not isinstance(words, list):
+            words = []
+        sorted_words = sorted(
+            [word for word in words if isinstance(word, dict)],
+            key=lambda item: int(item.get("count", 0) or 0),
+            reverse=True,
+        )
+        total = sum(int(item.get("count", 0) or 0) for item in sorted_words)
+        normalized_categories.append(
+            {
+                "name": category.get("name"),
+                "description": category.get("description"),
+                "words": sorted_words,
+                "_total": total,
+            }
+        )
+    normalized_categories.sort(key=lambda item: int(item.get("_total", 0)), reverse=True)
+    for category in normalized_categories:
+        category.pop("_total", None)
+    return {"categories": normalized_categories}
+
+
 def update_song_lyrics_in_corpus(
     corpus_songs: list[dict[str, object]],
     song_key: dict[str, object],
@@ -170,6 +201,7 @@ def _run_analysis_pipeline(
     exclude_versions: bool,
     filtering_strictness: StrictnessMode,
     manually_included_song_keys: set[str] | None = None,
+    manually_excluded_song_keys: set[str] | None = None,
     canonical_artist_name: str | None = None,
 ):
     dedupe_result = dedupe_songs(
@@ -185,6 +217,11 @@ def _run_analysis_pipeline(
         if manually_reincluded:
             included_songs = included_songs + manually_reincluded
             excluded_songs = [song for song in excluded_songs if _song_selection_key(song) not in manually_included_song_keys]
+    if manually_excluded_song_keys:
+        manually_removed = [song for song in included_songs if _song_selection_key(song) in manually_excluded_song_keys]
+        if manually_removed:
+            excluded_songs = excluded_songs + [{**song, "exclude_reason": "Manually excluded from included songs"} for song in manually_removed]
+            included_songs = [song for song in included_songs if _song_selection_key(song) not in manually_excluded_song_keys]
     if not included_songs:
         return None, included_songs, excluded_songs, {}
 
@@ -491,6 +528,10 @@ def main() -> None:
     st.set_page_config(page_title="Artist Wordprint", layout="wide")
     st.title("Artist Wordprint")
     st.caption("Analyze the words an artist returns to most.")
+    if "dismiss_genius_mode_info" not in st.session_state:
+        st.session_state["dismiss_genius_mode_info"] = False
+    if "dismiss_lyricsgenius_warning" not in st.session_state:
+        st.session_state["dismiss_lyricsgenius_warning"] = False
 
     with st.sidebar:
         st.header("Controls")
@@ -502,7 +543,15 @@ def main() -> None:
             index=0,
         )
         artist_name = st.text_input("Artist name", value="")
-        max_songs = st.slider("Max songs", min_value=10, max_value=200, value=50, step=5)
+        max_songs = int(
+            st.number_input(
+                "Max songs",
+                min_value=10,
+                max_value=500,
+                value=50,
+                step=5,
+            )
+        )
         include_features = st.checkbox("Include featured songs", value=False)
         dedupe_mode = st.selectbox(
             "Deduping mode",
@@ -529,7 +578,7 @@ def main() -> None:
         parallel_lyric_fetch_workers = st.slider(
             "Parallel lyric fetch workers",
             min_value=1,
-            max_value=50,
+            max_value=100,
             value=2,
             help="Higher values may be faster but more likely to trigger Genius rate limits.",
         )
@@ -548,14 +597,28 @@ def main() -> None:
     exclude_versions = dedupe_mode == "Strict canonical songs only"
 
     if input_mode == "Genius lyrics":
-        st.info(
-            "Genius lyrics mode uses `https://api.genius.com` metadata plus optional lyricsgenius hydration. "
-            "It may not include full lyrics; CSV/paste modes are the most reliable for lexical analysis."
-        )
-        st.warning(
-            "lyricsgenius retrieves lyrics by scraping Genius song pages, so it may fail if Genius blocks automated "
-            "requests. The official Genius API is still used for metadata."
-        )
+        if not st.session_state["dismiss_genius_mode_info"]:
+            info_col, dismiss_info_col = st.columns([20, 1])
+            with info_col:
+                st.info(
+                    "Genius lyrics mode uses `https://api.genius.com` metadata plus optional lyricsgenius hydration. "
+                    "It may not include full lyrics; CSV/paste modes are the most reliable for lexical analysis."
+                )
+            with dismiss_info_col:
+                if st.button("x", key="dismiss_genius_mode_info_btn", help="Dismiss this message"):
+                    st.session_state["dismiss_genius_mode_info"] = True
+                    st.rerun()
+        if not st.session_state["dismiss_lyricsgenius_warning"]:
+            warning_col, dismiss_warning_col = st.columns([20, 1])
+            with warning_col:
+                st.warning(
+                    "lyricsgenius retrieves lyrics by scraping Genius song pages, so it may fail if Genius blocks automated "
+                    "requests. The official Genius API is still used for metadata."
+                )
+            with dismiss_warning_col:
+                if st.button("x", key="dismiss_lyricsgenius_warning_btn", help="Dismiss this message"):
+                    st.session_state["dismiss_lyricsgenius_warning"] = True
+                    st.rerun()
 
     if input_mode == "Paste lyrics mode":
         _render_paste_mode_inputs()
@@ -649,23 +712,40 @@ def main() -> None:
         exclude_versions=exclude_versions,
         canonical_artist_name=artist_name if artist_name.strip() else None,
     )
+    included_preview = preview_dedupe.included
     excluded_preview = preview_dedupe.excluded
     manually_included_song_keys: list[str] = []
+    manually_excluded_song_keys: list[str] = []
+    if included_preview:
+        with st.expander("Included songs controls", expanded=False):
+            st.caption("Songs currently included after dedupe/version filtering. Select any to exclude from analysis.")
+            options = [_song_selection_key(song) for song in included_preview]
+            labels = {_song_selection_key(song): _song_display_label(song) for song in included_preview}
+            manually_excluded_song_keys = st.multiselect(
+                "Exclude from included songs",
+                options=options,
+                format_func=lambda key: labels.get(key, key),
+                key="manually_excluded_song_keys",
+            )
+            included_preview_df = pd.DataFrame(included_preview)
+            if not included_preview_df.empty:
+                show_cols = [col for col in ["title", "artist", "album", "release_date"] if col in included_preview_df.columns]
+                st.dataframe(included_preview_df[show_cols], width="stretch")
     if excluded_preview:
-        st.subheader("Excluded song controls")
-        st.caption("Songs excluded by dedupe/version filters are listed here. Select any to re-include.")
-        options = [_song_selection_key(song) for song in excluded_preview]
-        labels = {_song_selection_key(song): _song_display_label(song) for song in excluded_preview}
-        manually_included_song_keys = st.multiselect(
-            "Re-include excluded songs",
-            options=options,
-            format_func=lambda key: labels.get(key, key),
-            key="manually_included_song_keys",
-        )
-        excluded_preview_df = pd.DataFrame(excluded_preview)
-        if not excluded_preview_df.empty:
-            show_cols = [col for col in ["title", "artist", "exclude_reason", "album", "release_date"] if col in excluded_preview_df.columns]
-            st.dataframe(excluded_preview_df[show_cols], width="stretch")
+        with st.expander("Excluded songs controls", expanded=False):
+            st.caption("Songs excluded by dedupe/version filters. Select any to include in analysis.")
+            options = [_song_selection_key(song) for song in excluded_preview]
+            labels = {_song_selection_key(song): _song_display_label(song) for song in excluded_preview}
+            manually_included_song_keys = st.multiselect(
+                "Include from excluded songs",
+                options=options,
+                format_func=lambda key: labels.get(key, key),
+                key="manually_included_song_keys",
+            )
+            excluded_preview_df = pd.DataFrame(excluded_preview)
+            if not excluded_preview_df.empty:
+                show_cols = [col for col in ["title", "artist", "exclude_reason", "album", "release_date"] if col in excluded_preview_df.columns]
+                st.dataframe(excluded_preview_df[show_cols], width="stretch")
 
     analysis_result, included_songs, excluded_songs, token_diagnostics = _run_analysis_pipeline(
         raw_songs=corpus_songs,
@@ -673,6 +753,7 @@ def main() -> None:
         exclude_versions=exclude_versions,
         filtering_strictness=filtering_strictness,
         manually_included_song_keys=set(manually_included_song_keys),
+        manually_excluded_song_keys=set(manually_excluded_song_keys),
         canonical_artist_name=artist_name if artist_name.strip() else None,
     )
     if analysis_result is None:
@@ -707,6 +788,20 @@ def main() -> None:
             for idx, (_, row) in enumerate(analysis_result.word_frequencies_df.head(100).iterrows())
         ]
         st.text("\n".join(top_words_lines))
+
+    categories_payload = None
+    if categorize_words:
+        with st.spinner("Categorizing top words with OpenAI..."):
+            categories_payload, warning = categorize_top_words(analysis_result.top_words[:100])
+        if warning:
+            st.warning(warning)
+        elif categories_payload:
+            categories_payload = _sort_categories_payload(categories_payload)
+            st.subheader("Semantic categories")
+            cat_chart = make_category_chart(categories_payload)
+            if cat_chart is not None:
+                st.plotly_chart(cat_chart, width="stretch")
+            st.json(categories_payload)
 
     st.subheader("Top bigrams")
     st.plotly_chart(make_top_bigrams_chart(analysis_result.bigram_frequencies_df), width="stretch")
@@ -746,86 +841,75 @@ def main() -> None:
             st.subheader("Word cloud")
             st.image(image, width="stretch")
 
-    categories_payload = None
-    if categorize_words:
-        with st.spinner("Categorizing top words with OpenAI..."):
-            categories_payload, warning = categorize_top_words(analysis_result.top_words[:100])
-        if warning:
-            st.warning(warning)
-        elif categories_payload:
-            st.subheader("Semantic categories")
-            cat_chart = make_category_chart(categories_payload)
-            if cat_chart is not None:
-                st.plotly_chart(cat_chart, width="stretch")
-            st.json(categories_payload)
-
-    st.subheader("Included songs")
-    included_df = pd.DataFrame(included_songs)
-    if not included_df.empty:
-        songs_to_show = st.selectbox(
-            "Included songs rows to display",
-            options=[10, 50, 100],
-            index=0,
-        )
-        if "lyrics_char_count" not in included_df.columns:
-            included_df["lyrics_char_count"] = included_df.get("lyrics", "").apply(_lyrics_char_count)
-        if "lyrics_status" not in included_df.columns:
-            included_df["lyrics_status"] = included_df["lyrics_char_count"].apply(
-                lambda n: "available" if int(n) > 0 else "missing"
+    with st.expander("Included songs", expanded=False):
+        included_df = pd.DataFrame(included_songs)
+        if not included_df.empty:
+            songs_to_show = st.selectbox(
+                "Included songs rows to display",
+                options=[10, 50, 100],
+                index=0,
             )
-        if "lyrics_source" not in included_df.columns:
-            included_df["lyrics_source"] = included_df["lyrics_char_count"].apply(
-                lambda n: "cache" if int(n) > 0 else "none"
-            )
-        if hydration_rows:
-            hydration_df = pd.DataFrame(hydration_rows)
-            hydration_df["join_title"] = hydration_df["input_title"].astype(str).str.strip().str.lower()
-            hydration_df["join_artist"] = hydration_df["input_artist"].astype(str).str.strip().str.lower()
-            latest_hydration = (
-                hydration_df.sort_index()
-                .drop_duplicates(subset=["join_title", "join_artist"], keep="last")
-                [
+            if "lyrics_char_count" not in included_df.columns:
+                included_df["lyrics_char_count"] = included_df.get("lyrics", "").apply(_lyrics_char_count)
+            if "lyrics_status" not in included_df.columns:
+                included_df["lyrics_status"] = included_df["lyrics_char_count"].apply(
+                    lambda n: "available" if int(n) > 0 else "missing"
+                )
+            if "lyrics_source" not in included_df.columns:
+                included_df["lyrics_source"] = included_df["lyrics_char_count"].apply(
+                    lambda n: "cache" if int(n) > 0 else "none"
+                )
+            if hydration_rows:
+                hydration_df = pd.DataFrame(hydration_rows)
+                hydration_df["join_title"] = hydration_df["input_title"].astype(str).str.strip().str.lower()
+                hydration_df["join_artist"] = hydration_df["input_artist"].astype(str).str.strip().str.lower()
+                latest_hydration = (
+                    hydration_df.sort_index()
+                    .drop_duplicates(subset=["join_title", "join_artist"], keep="last")
                     [
-                        "join_title",
-                        "join_artist",
-                        "found_song",
-                        "returned_title",
-                        "returned_artist",
-                        "lyricsgenius_lyrics_char_count",
-                        "blocked",
-                        "error_message",
+                        [
+                            "join_title",
+                            "join_artist",
+                            "found_song",
+                            "returned_title",
+                            "returned_artist",
+                            "lyricsgenius_lyrics_char_count",
+                            "blocked",
+                            "error_message",
+                        ]
                     ]
-                ]
-            )
-            included_df["join_title"] = included_df["title"].astype(str).str.strip().str.lower()
-            included_df["join_artist"] = included_df["artist"].astype(str).str.strip().str.lower()
-            included_df = included_df.merge(
-                latest_hydration,
-                on=["join_title", "join_artist"],
-                how="left",
-            )
-        requested_columns = [
-            "title",
-            "artist",
-            "lyrics_status",
-            "lyrics_char_count",
-            "lyrics_source",
-            "found_song",
-            "returned_title",
-            "returned_artist",
-            "lyricsgenius_lyrics_char_count",
-            "blocked",
-            "error_message",
-            "album",
-            "release_date",
-            "url",
-        ]
-        available_columns = [col for col in requested_columns if col in included_df.columns]
-        st.dataframe(included_df[available_columns].head(int(songs_to_show)))
+                )
+                included_df["join_title"] = included_df["title"].astype(str).str.strip().str.lower()
+                included_df["join_artist"] = included_df["artist"].astype(str).str.strip().str.lower()
+                included_df = included_df.merge(
+                    latest_hydration,
+                    on=["join_title", "join_artist"],
+                    how="left",
+                )
+            requested_columns = [
+                "title",
+                "artist",
+                "lyrics_status",
+                "lyrics_char_count",
+                "lyrics_source",
+                "found_song",
+                "returned_title",
+                "returned_artist",
+                "lyricsgenius_lyrics_char_count",
+                "blocked",
+                "error_message",
+                "album",
+                "release_date",
+                "url",
+            ]
+            available_columns = [col for col in requested_columns if col in included_df.columns]
+            st.dataframe(included_df[available_columns].head(int(songs_to_show)))
+        else:
+            st.info("No included songs to display.")
 
     if excluded_songs:
-        st.subheader("Excluded songs")
-        st.dataframe(excluded_songs, width="stretch")
+        with st.expander("Excluded songs", expanded=False):
+            st.dataframe(excluded_songs, width="stretch")
 
     st.subheader("Exports")
     export_cols = st.columns(3)
