@@ -1,5 +1,6 @@
 # Lyric Atlas (Streamlit + Python backend)
-Go to [lyricatlas.com](lyricatlas.com)
+Go to [lyricatlas.com](lyricatlas.com).
+
 Analyzes the words an artist returns to most using a reliable local lyric-analysis workflow.
 
 UPDATE: Genius has started aggressively removing auto-scrapers (including BeautifulSoup, which this app uses). As such, live updating may be blocked. So, test app capabilities through the Archived Artists section.
