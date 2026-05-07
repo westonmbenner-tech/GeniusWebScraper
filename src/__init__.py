@@ -1,0 +1,1 @@
+"""Artist Wordprint source package."""

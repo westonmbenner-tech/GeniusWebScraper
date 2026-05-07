@@ -1,0 +1,12 @@
+# GeniusWebScraper — pinned for reproducible installs (python -m pip install -r requirements.txt)
+boto3==1.43.5
+lyricsgenius==3.12.1
+nltk==3.9.4
+openai==2.34.0
+pandas==3.0.2
+plotly==6.7.0
+python-dotenv==1.2.2
+requests==2.33.1
+streamlit==1.57.0
+supabase==2.30.0
+wordcloud==1.9.6
